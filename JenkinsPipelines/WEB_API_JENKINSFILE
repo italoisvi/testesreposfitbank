@@ -1,0 +1,134 @@
+// Pipeline ultilizado para deploy de aplicações Web e Api do Fitbank
+
+pipeline {
+    agent any
+    
+    environment {
+        SERVER  = 'localhost' // Host to deploy
+        APP     = 'FitBankAPI' // Application name
+        PROJECT = 'FB.Api.Rest' // Project name 
+        MSBUILD = '2017\\BuildTools\\MSBuild\\15.0\\Bin\\msbuild.exe' // MSBUILD path
+        SOLUTION = 'fb_solution\\FB.Solution.sln' // Solution path
+    }
+
+    stages {
+        stage('Clone Repository') {
+            steps {
+                git url: 'project_repository',
+                credentialsId: "git_credentials",
+                branch: ("${env.BRANCH}".split("/").length > 3 ? "${env.BRANCH}".split("/")[2] + "/" + "${env.BRANCH}".split("/")[3] : "${env.BRANCH}".split("/")[2])
+            }
+        }
+        stage('Copy Pipeline Scripts'){
+            steps{
+                powershell script: """
+                    mkdir '$WORKSPACE\\scripts' -Force
+                    Get-ChildItem -Path 'C:\\scripts' | Copy-Item -Destination '$WORKSPACE\\scripts\\' -Recurse -Force
+                """
+            }
+        }
+        stage('Creating Folders'){
+            steps{
+                powershell script: """
+                    .\\scripts\\create-folders.ps1 '$PROJECT' '$WORKSPACE'
+                """
+            }
+        }
+        stage('Backup Files in Server'){
+            steps{
+                withCredentials([
+                    usernamePassword(
+                      credentialsId: "windows_credentials",
+                      usernameVariable: 'USER',
+                      passwordVariable: 'PASS'
+                    )
+                ]){
+                powershell script: """
+                    .\\scripts\\backup-files.ps1 '$SERVER' '$USER' '$PASS' '$APP' 'C:\\BackupDeploy\\Sites' 'C:\\Fitbank\\Deploy\\Sites'
+                """
+                }
+            }
+        }
+        stage('Restore Packages'){
+            steps{
+                powershell script: """
+                    .\\scripts\\nuget-restore.ps1 '$WORKSPACE\\${SOLUTION}'
+                """
+            }
+        }
+        stage('Build With MSBUILD'){
+            steps{
+                powershell script: """
+                    .\\scripts\\build-with-msbuild.ps1 '$MSBUILD' '${PROJECT}' '$WORKSPACE'
+                """
+            } 
+        }
+        stage('Compress Files'){
+            steps{
+                powershell script: """
+                    .\\scripts\\compress-files.ps1 '${PROJECT}' '$WORKSPACE'
+                """
+            }
+        }
+        stage('Send File Into Server'){
+            steps{
+                powershell script: """
+                    .\\scripts\\copy-item.ps1 '${PROJECT}' '$WORKSPACE' '${SERVER}'
+                """
+            }
+        } 
+        stage('Uncompress Files Into Server'){
+            steps{
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: "windows_credentials",
+                        usernameVariable: 'USER',
+                        passwordVariable: 'PASS'
+                    )
+                ]){
+                powershell script: """
+                    .\\scripts\\unzip-files.ps1 '$USER' '$PASS' '${SERVER}' '${PROJECT}' '${APP}' 'C:\\Fitbank\\Deploy\\Sites'
+                """
+                }
+            }
+        }
+        stage('Restart IIS Service'){
+            steps{
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: "windows_credentials",
+                        usernameVariable: 'USER',
+                        passwordVariable: 'PASS'
+                    )
+                ]){
+                powershell script: """
+                    .\\scripts\\restart-iis.ps1 '$USER' '$PASS' '${SERVER}' '${APP}'
+                """
+                }
+            }
+        }
+    }
+    post {
+        always {
+            echo 'Realizando a limpera do Workspace!'
+            cleanWs()
+        }
+        success {
+            echo 'Deploy com sucesso!'
+        }
+        failure {
+            echo "Falha no deploy, revertendo último backup!"
+            withCredentials([
+                usernamePassword(
+                    credentialsId: "windows_credentials",
+                    usernameVariable: 'USER',
+                    passwordVariable: 'PASS'
+                )
+            ]){
+            powershell script: """
+                .\\scripts\\restore-files.ps1 '${SERVER}' '$USER' '$PASS' '${APP}' 'C:\\BackupDeploy\\Sites' 'C:\\Fitbank\\Deploy\\Sites'
+            """
+            }
+        }
+    }
+}
